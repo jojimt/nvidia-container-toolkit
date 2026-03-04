@@ -78,6 +78,10 @@ type options struct {
 	noAllDevice bool
 	deviceIDs   []string
 
+	// driverRootOnly generates a CDI spec from driver-root only (no GPU/NVML).
+	// Skips device discovery and produces a single "all" device with common edits only.
+	driverRootOnly bool
+
 	// the following are used for dependency injection during spec generation.
 	nvmllib nvml.Interface
 }
@@ -257,6 +261,12 @@ func (m command) build() *cli.Command {
 				Destination: &opts.deviceIDs,
 				Sources:     cli.EnvVars("NVIDIA_CTK_CDI_GENERATE_DEVICE_IDS"),
 			},
+			&cli.BoolFlag{
+				Name:        "driver-root-only",
+				Usage:       "Generate CDI spec from driver-root only (no GPU/NVML). Use in build environments without GPUs; produces a single 'all' device with common driver mounts and hooks.",
+				Destination: &opts.driverRootOnly,
+				Sources:     cli.EnvVars("NVIDIA_CTK_CDI_GENERATE_DRIVER_ROOT_ONLY"),
+			},
 		},
 	}
 
@@ -311,6 +321,9 @@ func (m command) validateFlags(c *cli.Command, opts *options) error {
 	if slices.Contains(opts.deviceIDs, "none") && !opts.noAllDevice {
 		m.logger.Warningf("Disabling generation of 'all' device")
 		opts.noAllDevice = true
+	}
+	if opts.driverRootOnly && opts.driverRoot == "" {
+		return fmt.Errorf("--driver-root-only requires --driver-root to be set")
 	}
 	return nil
 }
@@ -406,9 +419,24 @@ func (m command) generateSpecs(opts *options) ([]generatedSpecs, error) {
 		return nil, fmt.Errorf("failed to create CDI library: %v", err)
 	}
 
-	allDeviceSpecs, err := cdilib.GetDeviceSpecsByID(opts.deviceIDs...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create device CDI specs: %v", err)
+	var allDeviceSpecs []specs.Device
+	if opts.driverRootOnly {
+		// No GPU/NVML: skip device discovery and use a single "all" device with common edits only.
+		// CDI requires each device to have at least one edit; use a dummy env so the device is valid.
+		allDeviceSpecs = []specs.Device{
+			{
+				Name: allDeviceName,
+				ContainerEdits: specs.ContainerEdits{
+					Env: []string{"NVCT_DRIVER_ROOT_ONLY=1"},
+				},
+			},
+		}
+		m.logger.Infof("Using driver-root-only mode (no NVML/GPU)")
+	} else {
+		allDeviceSpecs, err = cdilib.GetDeviceSpecsByID(opts.deviceIDs...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create device CDI specs: %v", err)
+		}
 	}
 
 	commonEdits, err := cdilib.GetCommonEdits()

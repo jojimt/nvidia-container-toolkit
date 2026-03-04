@@ -57,18 +57,22 @@ func (d *mounts) Mounts() ([]Mount, error) {
 	if d.lookup == nil {
 		return nil, fmt.Errorf("no lookup defined")
 	}
+	d.logger.Debugf("Mounts: resolving %d required path(s)", len(d.required))
 
 	var mounts []Mount
 	seen := make(map[string]bool)
+	missing := 0
 	for _, candidate := range d.required {
 		d.logger.Debugf("Locating %v", candidate)
 		located, err := d.lookup.Locate(candidate)
 		if err != nil {
 			d.logger.Warningf("Could not locate %v: %v", candidate, err)
+			missing++
 			continue
 		}
 		if len(located) == 0 {
 			d.logger.Warningf("Missing %v", candidate)
+			missing++
 			continue
 		}
 		d.logger.Debugf("Located %v as %v", candidate, located)
@@ -98,6 +102,9 @@ func (d *mounts) Mounts() ([]Mount, error) {
 			mounts = append(mounts, mount)
 			seen[p] = true
 		}
+	}
+	if missing > 0 {
+		d.logger.Infof("Mounts: resolved %d of %d required path(s), %d missing", len(mounts), len(d.required), missing)
 	}
 
 	return mounts, nil

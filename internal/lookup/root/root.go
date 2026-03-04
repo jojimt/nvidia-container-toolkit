@@ -190,8 +190,13 @@ func (r *Driver) RelativeToRoot(path string) string {
 	if !filepath.IsAbs(path) {
 		return path
 	}
-
-	return strings.TrimPrefix(path, r.Root)
+	// Normalize so TrimPrefix matches regardless of trailing slashes or "//" in root.
+	rootClean := filepath.Clean(r.Root)
+	pathClean := filepath.Clean(path)
+	if rel := strings.TrimPrefix(pathClean, rootClean); rel != pathClean {
+		return rel
+	}
+	return path
 }
 
 // Files returns a Locator for arbitrary driver files.

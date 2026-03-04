@@ -129,6 +129,7 @@ func (l *nvcdilib) getVersionSuffixDriverLibraryMounts(version string) (discover
 	if err != nil {
 		return nil, fmt.Errorf("failed to get libraries for driver version: %v", err)
 	}
+	l.logger.Infof("getVersionSuffixDriverLibraryMounts: using %d path(s) for version-suffix library mounts (driver root=%q)", len(versionSuffixLibraryPaths), l.driver.Root)
 
 	mounts := discover.NewMounts(
 		l.logger,
@@ -166,7 +167,8 @@ func (l *nvcdilib) getExplicitDriverLibraryMounts() (discover.Discover, error) {
 		"libnvidia-egl-xlib.so",
 	}
 
-	driverLibraryLocator, err := l.driver.DriverLibraryLocator()
+	// Include "nvidia" subdir so libs in usr/lib/<arch>/nvidia/ are found
+	driverLibraryLocator, err := l.driver.DriverLibraryLocator("nvidia")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get driver library locator: %w", err)
 	}
@@ -260,30 +262,93 @@ func (l *nvcdilib) newDriverBinariesDiscoverer() discover.Discover {
 	)
 }
 
-// getVersionLibs checks the LDCache for libraries ending in the specified driver version.
-// Although the ldcache at the specified driverRoot is queried, the paths are returned relative to this driverRoot.
-// This allows the standard mount location logic to be used for resolving the mounts.
+// getVersionLibs returns libraries under the driver lib directory that should be
+// mounted. It includes:
+//  1. All files matching *.so.<version> (driver version, e.g. 590.48.01)
+//  2. All files matching *.so.* (any version suffix) so that libs with
+//     library-specific versions (e.g. libnvidia-egl-gbm.so.1.1.3) are included.
+//
+// The driver lib directory is walked recursively so libs in any subdir are found.
 func (l *nvcdilib) getVersionLibs(version string) ([]string, error) {
 	l.logger.Infof("Using driver version %v", version)
 
-	libraries, err := l.driver.DriverLibraryLocator("vdpau")
+	driverLibDir, err := l.driver.GetDriverLibDirectory()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get driver library locator: %w", err)
+		return nil, fmt.Errorf("failed to get driver lib directory: %w", err)
 	}
 
-	libs, err := libraries.Locate("*.so." + version)
+	root := l.driver.Root
+	if root == "" {
+		root = "/"
+	}
+	root = filepath.Clean(root)
+	// Avoid doubling the root: GetDriverLibDirectory() can return a path that is
+	// relative to "/" but already contains the root path (e.g. "kata-containers/.../rootfs-.../usr/lib/...")
+	// when the library locator uses root "/". Strip that prefix so Join(root, rel) is correct.
+	relLibDir := filepath.Clean(driverLibDir)
+	if !filepath.IsAbs(relLibDir) && root != "" && root != "/" {
+		rootRel := strings.TrimPrefix(root, string(filepath.Separator))
+		if rootRel != "" && strings.HasPrefix(relLibDir, rootRel) {
+			relLibDir = strings.TrimPrefix(relLibDir, rootRel)
+			relLibDir = strings.TrimPrefix(relLibDir, string(filepath.Separator))
+		}
+	}
+	absLibDir := filepath.Join(root, relLibDir)
+	if _, err := os.Stat(absLibDir); err != nil {
+		l.logger.Warningf("getVersionLibs: driver lib dir does not exist or not accessible: %q (root=%q driverLibDir=%q): %v", absLibDir, root, driverLibDir, err)
+		return nil, fmt.Errorf("driver lib dir %q: %w", absLibDir, err)
+	}
+	l.logger.Infof("getVersionLibs: walking driver lib dir %q (root=%q)", absLibDir, root)
+	driverVersionPattern := "*.so." + version
+	anyVersionPattern := "*.so.*"
+	var libs []string
+	err = filepath.WalkDir(absLibDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		base := filepath.Base(path)
+		// Match *.so.<driverVersion> or any *.so.<anything> (versioned shared lib)
+		matched, _ := filepath.Match(driverVersionPattern, base)
+		if !matched {
+			matched, _ = filepath.Match(anyVersionPattern, base)
+		}
+		if !matched {
+			return nil
+		}
+		rel := strings.TrimPrefix(path, root)
+		rel = strings.TrimPrefix(rel, string(filepath.Separator))
+		if rel == "" {
+			return nil
+		}
+		libs = append(libs, rel)
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to locate libraries for driver version %v: %v", version, err)
+		return nil, fmt.Errorf("failed to walk driver lib dir %q: %w", absLibDir, err)
 	}
 
-	if l.driver.Root == "/" || l.driver.Root == "" {
-		return libs, nil
+	seen := make(map[string]bool)
+	var out []string
+	for _, p := range libs {
+		if seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
 	}
-
-	var relative []string
-	for _, lib := range libs {
-		relative = append(relative, strings.TrimPrefix(lib, l.driver.Root))
+	l.logger.Infof("getVersionLibs: found %d versioned lib(s) under %q (after dedupe)", len(out), absLibDir)
+	for i, p := range out {
+		if i < 5 || i >= len(out)-2 {
+			l.logger.Debugf("getVersionLibs: [%d] %s", i, p)
+		} else if i == 5 {
+			l.logger.Debugf("getVersionLibs: ... (%d more)", len(out)-7)
+		}
 	}
-
-	return relative, nil
+	return out, nil
 }
