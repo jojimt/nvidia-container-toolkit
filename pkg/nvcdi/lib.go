@@ -216,17 +216,23 @@ func (o *options) getNvsandboxUtilsLib() nvsandboxutils.Interface {
 }
 
 func (o *options) getDriverOptions() []root.Option {
-	return []root.Option{
+	opts := []root.Option{
 		root.WithLogger(o.logger),
 		root.WithDriverRoot(o.driverRoot),
 		root.WithDevRoot(o.devRoot),
 		root.WithLibrarySearchPaths(o.librarySearchPaths...),
 		root.WithConfigSearchPaths(o.configSearchPaths...),
-		root.WithVersioner(
+	}
+	if o.noDevice {
+		// No versioner: driver version will be inferred from the filesystem when Version() is first called.
+		opts = append(opts, root.WithVersioner(nil))
+	} else {
+		opts = append(opts, root.WithVersioner(
 			root.FirstOf(
 				nvsandboxutilslibWithVersion(o.nvsandboxutilslib),
 				nvmllibWithVersion(o.nvmllib),
 			),
-		),
+		))
 	}
+	return opts
 }

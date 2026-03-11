@@ -27,6 +27,7 @@ import (
 	"github.com/NVIDIA/go-nvml/pkg/nvml/mock/dgxa100"
 	testlog "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/require"
+	cdipkg "tags.cncf.io/container-device-interface/pkg/cdi"
 	"tags.cncf.io/container-device-interface/specs-go"
 
 	"github.com/NVIDIA/nvidia-container-toolkit/internal/devices"
@@ -679,4 +680,75 @@ func TestSplitOnAnnotation(t *testing.T) {
 			require.EqualValues(t, tc.expectedInputPostSplit, tc.input)
 		})
 	}
+}
+
+func TestValidateFlagsNodevice(t *testing.T) {
+	logger, _ := testlog.NewNullLogger()
+	c := command{logger: logger}
+
+	t.Run("nodevice with management mode is valid", func(t *testing.T) {
+		opts := options{
+			format:   "yaml",
+			mode:     "management",
+			vendor:   "nvidia.com",
+			class:    "gpu",
+			noDevice: true,
+		}
+		err := c.validateFlags(nil, &opts)
+		require.NoError(t, err)
+	})
+
+	t.Run("nodevice with non-management mode returns error", func(t *testing.T) {
+		opts := options{
+			format:   "yaml",
+			mode:     "nvml",
+			vendor:   "nvidia.com",
+			class:    "gpu",
+			noDevice: true,
+		}
+		err := c.validateFlags(nil, &opts)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "nodevice")
+		require.Contains(t, err.Error(), "management")
+	})
+}
+
+func TestExtractHostPathsFromEdits(t *testing.T) {
+	t.Run("nil edits", func(t *testing.T) {
+		require.Nil(t, extractHostPathsFromEdits(nil))
+	})
+
+	t.Run("nil ContainerEdits", func(t *testing.T) {
+		edits := &cdipkg.ContainerEdits{}
+		require.Nil(t, extractHostPathsFromEdits(edits))
+	})
+
+	t.Run("mounts and device nodes sorted and deduplicated", func(t *testing.T) {
+		edits := &cdipkg.ContainerEdits{
+			ContainerEdits: &specs.ContainerEdits{
+				Mounts: []*specs.Mount{
+					{HostPath: "/usr/bin/nvidia-smi", ContainerPath: "/usr/bin/nvidia-smi"},
+					{HostPath: "/usr/lib/libnvidia.so.1", ContainerPath: "/usr/lib/libnvidia.so.1"},
+				},
+				DeviceNodes: []*specs.DeviceNode{
+					{Path: "/dev/nvidiactl", HostPath: "/dev/nvidiactl"},
+				},
+			},
+		}
+		paths := extractHostPathsFromEdits(edits)
+		require.Equal(t, []string{"/dev/nvidiactl", "/usr/bin/nvidia-smi", "/usr/lib/libnvidia.so.1"}, paths)
+	})
+
+	t.Run("duplicate host paths deduplicated", func(t *testing.T) {
+		edits := &cdipkg.ContainerEdits{
+			ContainerEdits: &specs.ContainerEdits{
+				Mounts: []*specs.Mount{
+					{HostPath: "/same/path", ContainerPath: "/a"},
+					{HostPath: "/same/path", ContainerPath: "/b"},
+				},
+			},
+		}
+		paths := extractHostPathsFromEdits(edits)
+		require.Equal(t, []string{"/same/path"}, paths)
+	})
 }

@@ -55,6 +55,10 @@ type options struct {
 	enabledHooks  []discover.HookName
 
 	editsFactory edits.Factory
+
+	// noDevice indicates that no GPU/driver is present (e.g. when trimming a rootfs).
+	// When true, NVML and nvsandboxutils are not used; driver version is inferred from the filesystem only.
+	noDevice bool
 }
 
 type platformlibs struct {
@@ -91,6 +95,12 @@ func populateOptions(opts ...Option) *options {
 	}
 	if o.nvmllib == nil {
 		o.nvmllib = o.getNvmlLib()
+	}
+	if o.noDevice {
+		// Skip NVML and nvsandboxutils when there is no device (e.g. trimming rootfs);
+		// the driver is not loaded so these would fail.
+		o.nvmllib = nil
+		o.nvsandboxutilslib = nil
 	}
 	if o.devicelib == nil {
 		o.devicelib = device.New(o.nvmllib)
@@ -358,4 +368,13 @@ func WithDisabledHook[T string | HookName](hook T) Option {
 // Deprecated: Use WithFeatureFlags
 func WithFeatureFlag[T string | FeatureFlag](featureFlag T) Option {
 	return WithFeatureFlags(featureFlag)
+}
+
+// WithNoDevice indicates that no GPU or driver is present (e.g. when generating
+// a list of host paths for trimming a rootfs). When true, NVML and nvsandboxutils
+// are not used; the driver version is inferred from the filesystem only.
+func WithNoDevice(noDevice bool) Option {
+	return func(o *options) {
+		o.noDevice = noDevice
+	}
 }

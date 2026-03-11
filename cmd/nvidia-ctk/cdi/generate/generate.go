@@ -27,7 +27,8 @@ import (
 
 	"github.com/urfave/cli/v3"
 
-	cdi "tags.cncf.io/container-device-interface/pkg/parser"
+	cdiparser "tags.cncf.io/container-device-interface/pkg/parser"
+	cdipkg "tags.cncf.io/container-device-interface/pkg/cdi"
 	"tags.cncf.io/container-device-interface/specs-go"
 
 	"github.com/NVIDIA/go-nvml/pkg/nvml"
@@ -77,6 +78,10 @@ type options struct {
 
 	noAllDevice bool
 	deviceIDs   []string
+
+	// noDevice outputs only the list of host paths that would be mounted (management mode only).
+	// Used for trimming a rootfs by copying those paths into a minimal image.
+	noDevice bool
 
 	// the following are used for dependency injection during spec generation.
 	nvmllib nvml.Interface
@@ -257,6 +262,12 @@ func (m command) build() *cli.Command {
 				Destination: &opts.deviceIDs,
 				Sources:     cli.EnvVars("NVIDIA_CTK_CDI_GENERATE_DEVICE_IDS"),
 			},
+			&cli.BoolFlag{
+				Name:        "nodevice",
+				Usage:       "Output only the list of host paths that the toolkit would mount into any container (one per line). Valid only with --mode=management. Used for copying these paths into a minimal rootfs.",
+				Destination: &opts.noDevice,
+				Sources:     cli.EnvVars("NVIDIA_CTK_CDI_GENERATE_NODEVICE"),
+			},
 		},
 	}
 
@@ -295,10 +306,10 @@ func (m command) validateFlags(c *cli.Command, opts *options) error {
 		}
 	}
 
-	if err := cdi.ValidateVendorName(opts.vendor); err != nil {
+	if err := cdiparser.ValidateVendorName(opts.vendor); err != nil {
 		return fmt.Errorf("invalid CDI vendor name: %v", err)
 	}
-	if err := cdi.ValidateClassName(opts.class); err != nil {
+	if err := cdiparser.ValidateClassName(opts.class); err != nil {
 		return fmt.Errorf("invalid CDI class name: %v", err)
 	}
 
@@ -312,10 +323,18 @@ func (m command) validateFlags(c *cli.Command, opts *options) error {
 		m.logger.Warningf("Disabling generation of 'all' device")
 		opts.noAllDevice = true
 	}
+
+	if opts.noDevice && opts.mode != string(nvcdi.ModeManagement) {
+		return fmt.Errorf("--nodevice is only valid with --mode=%s", nvcdi.ModeManagement)
+	}
 	return nil
 }
 
 func (m command) run(opts *options) error {
+	if opts.noDevice {
+		return m.runNoDevice(opts)
+	}
+
 	specs, err := m.generateSpecs(opts)
 	if err != nil {
 		return fmt.Errorf("failed to generate CDI spec: %v", err)
@@ -330,6 +349,79 @@ func (m command) run(opts *options) error {
 	}
 
 	return errs
+}
+
+// runNoDevice outputs the list of host paths that the toolkit would mount into any container.
+// Used for trimming a rootfs by copying these paths into a minimal image.
+func (m command) runNoDevice(opts *options) error {
+	cdiOptions, err := m.buildCDIOptions(opts)
+	if err != nil {
+		return fmt.Errorf("failed to build CDI options: %v", err)
+	}
+	cdilib, err := nvcdi.New(cdiOptions...)
+	if err != nil {
+		return fmt.Errorf("failed to create CDI library: %v", err)
+	}
+
+	commonEdits, err := cdilib.GetCommonEdits()
+	if err != nil {
+		return fmt.Errorf("failed to get common edits: %v", err)
+	}
+
+	hostPaths := extractHostPathsFromEdits(commonEdits)
+	if len(hostPaths) == 0 {
+		m.logger.Warningf("No host paths found in common edits")
+	}
+
+	out := os.Stdout
+	if opts.output != "" {
+		f, err := os.Create(opts.output)
+		if err != nil {
+			return fmt.Errorf("failed to create output file: %v", err)
+		}
+		defer f.Close()
+		out = f
+	}
+
+	for _, p := range hostPaths {
+		if _, err := fmt.Fprintln(out, p); err != nil {
+			return fmt.Errorf("failed to write host path: %v", err)
+		}
+	}
+
+	if opts.output != "" {
+		m.logger.Infof("Wrote %d host path(s) to %s", len(hostPaths), opts.output)
+	}
+	return nil
+}
+
+// extractHostPathsFromEdits returns a sorted, deduplicated list of host paths
+// from the mounts (and device nodes) in the given container edits.
+func extractHostPathsFromEdits(edits *cdipkg.ContainerEdits) []string {
+	if edits == nil || edits.ContainerEdits == nil {
+		return nil
+	}
+	ce := edits.ContainerEdits
+	seen := make(map[string]struct{})
+	var paths []string
+	for _, mount := range ce.Mounts {
+		if mount != nil && mount.HostPath != "" {
+			if _, ok := seen[mount.HostPath]; !ok {
+				seen[mount.HostPath] = struct{}{}
+				paths = append(paths, mount.HostPath)
+			}
+		}
+	}
+	for _, dev := range ce.DeviceNodes {
+		if dev != nil && dev.HostPath != "" {
+			if _, ok := seen[dev.HostPath]; !ok {
+				seen[dev.HostPath] = struct{}{}
+				paths = append(paths, dev.HostPath)
+			}
+		}
+	}
+	slices.Sort(paths)
+	return paths
 }
 
 func formatFromFilename(filename string) string {
@@ -371,17 +463,17 @@ func (g generatedSpecs) updateFilename(filename string) string {
 	return strings.TrimSuffix(filename, ext) + g.filenameInfix + ext
 }
 
-func (m command) generateSpecs(opts *options) ([]generatedSpecs, error) {
+func (m command) buildCDIOptions(opts *options) ([]nvcdi.Option, error) {
 	var deviceNamers []nvcdi.DeviceNamer
 	for _, strategy := range opts.deviceNameStrategies {
 		deviceNamer, err := nvcdi.NewDeviceNamer(strategy)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create device namer: %v", err)
+			return nil, err
 		}
 		deviceNamers = append(deviceNamers, deviceNamer)
 	}
 
-	cdiOptions := []nvcdi.Option{
+	return []nvcdi.Option{
 		nvcdi.WithLogger(m.logger),
 		nvcdi.WithDriverRoot(opts.driverRoot),
 		nvcdi.WithDevRoot(opts.devRoot),
@@ -397,8 +489,15 @@ func (m command) generateSpecs(opts *options) ([]generatedSpecs, error) {
 		nvcdi.WithDisabledHooks(opts.disabledHooks...),
 		nvcdi.WithEnabledHooks(opts.enabledHooks...),
 		nvcdi.WithFeatureFlags(opts.featureFlags...),
-		// We set the following to allow for dependency injection:
+		nvcdi.WithNoDevice(opts.noDevice),
 		nvcdi.WithNvmlLib(opts.nvmllib),
+	}, nil
+}
+
+func (m command) generateSpecs(opts *options) ([]generatedSpecs, error) {
+	cdiOptions, err := m.buildCDIOptions(opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build CDI options: %v", err)
 	}
 
 	cdilib, err := nvcdi.New(cdiOptions...)
