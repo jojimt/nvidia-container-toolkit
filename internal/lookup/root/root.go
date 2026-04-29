@@ -113,6 +113,22 @@ func (r *Driver) GetDriverLibDirectory() (string, error) {
 	return r.driverLibDirectory, nil
 }
 
+// defaultHostLibraryPaths are host paths searched when the driver root is not "/"
+// (e.g. when building a rootfs) so that libraries can still be found on the host.
+var defaultHostLibraryPaths = []string{
+	"/",
+	"/usr/lib64",
+	"/usr/lib/x86_64-linux-gnu",
+	"/usr/lib/aarch64-linux-gnu",
+	"/usr/lib/x86_64-linux-gnu/nvidia/current",
+	"/usr/lib/aarch64-linux-gnu/nvidia/current",
+	"/lib64",
+	"/lib/x86_64-linux-gnu",
+	"/lib/aarch64-linux-gnu",
+	"/lib/x86_64-linux-gnu/nvidia/current",
+	"/lib/aarch64-linux-gnu/nvidia/current",
+}
+
 func (r *Driver) DriverLibraryLocator(additionalDirs ...string) (lookup.Locator, error) {
 	libcudasoParentDirPath, err := r.GetDriverLibDirectory()
 	if err != nil {
@@ -126,6 +142,12 @@ func (r *Driver) DriverLibraryLocator(additionalDirs ...string) (lookup.Locator,
 		} else {
 			searchPaths = append(searchPaths, filepath.Join(libcudasoParentDirPath, dir))
 		}
+	}
+
+	// When driver root is not the host root (e.g. a rootfs being built), also search
+	// the host's standard library paths so we find libraries that are not yet in the rootfs.
+	if r.Root != "" && r.Root != "/" {
+		searchPaths = append(searchPaths, defaultHostLibraryPaths...)
 	}
 
 	l := lookup.AsOptional(

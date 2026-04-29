@@ -148,22 +148,23 @@ func (l *nvcdilib) getExplicitDriverLibraryMounts() (discover.Discover, error) {
 		return nil, nil
 	}
 
-	// List of explicit libraries to locate
+	// List of explicit libraries to locate. Use "lib*.so*" patterns so that
+	// both unversioned (libGL.so) and versioned (libGL.so.1, libGL.so.1.0.0) files are found.
 	// TODO(ArangoGutierrez): we should load the version of the libraries from
 	// the sandboxutils-filelist or have a way to allow users to specify the
 	// libraries to mount from the config file.
 	explicitLibraries := []string{
-		"libEGL.so",
-		"libGL.so",
-		"libGLESv1_CM.so",
-		"libGLESv2.so",
-		"libGLX.so",
-		"libGLdispatch.so",
-		"libOpenCL.so",
-		"libOpenGL.so",
-		"libnvidia-api.so",
-		"libnvidia-egl-xcb.so",
-		"libnvidia-egl-xlib.so",
+		"libEGL.so*",
+		"libGL.so*",
+		"libGLESv1_CM.so*",
+		"libGLESv2.so*",
+		"libGLX.so*",
+		"libGLdispatch.so*",
+		"libOpenCL.so*",
+		"libOpenGL.so*",
+		"libnvidia-api.so*",
+		"libnvidia-egl-xcb.so*",
+		"libnvidia-egl-xlib.so*",
 	}
 
 	driverLibraryLocator, err := l.driver.DriverLibraryLocator()
